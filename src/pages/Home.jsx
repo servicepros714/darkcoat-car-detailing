@@ -17,12 +17,12 @@ import { Packages, Reviews, Faq, Cta, AreaChips } from '../components/Sections.j
 import useReveal from '../lib/useReveal.js';
 
 const GALLERY = [
-  { src: '/images/blue-gt.webp', caption: 'Snow foam pre-soak', tag: 'Exterior' },
-  { src: '/images/red-headlight.webp', caption: 'Foam dwell on paint & lights', tag: 'Exterior' },
-  { src: '/images/black-rinse.webp', caption: 'Pressure rinse & wheel clean', tag: 'Wheels' },
-  { src: '/images/red-side-garage.webp', caption: 'Panel-by-panel hand wash', tag: 'Exterior' },
-  { src: '/images/rear-foam.webp', caption: 'Mitt hand wash', tag: 'Exterior' },
-  { src: '/images/red-hood-foam.webp', caption: 'Full-coverage foam coat', tag: 'Exterior' },
+  { src: '/images/blue-gt.webp', caption: 'Snow foam pre-soak', tag: 'Exterior', alt: 'Blue sports car under a snow foam pre-soak' },
+  { src: '/images/red-headlight.webp', caption: 'Foam dwell on paint & lights', tag: 'Exterior', alt: 'Foam on the paint and headlight of a red car' },
+  { src: '/images/black-rinse.webp', caption: 'Pressure rinse & wheel clean', tag: 'Wheels', alt: 'Black car being rinsed during a hand wash' },
+  { src: '/images/red-side-garage.webp', caption: 'Panel-by-panel hand wash', tag: 'Exterior', alt: 'Red car being hand washed panel by panel' },
+  { src: '/images/rear-foam.webp', caption: 'Mitt hand wash', tag: 'Exterior', alt: 'Foamed car being washed by hand with a wash mitt' },
+  { src: '/images/red-hood-foam.webp', caption: 'Full-coverage foam coat', tag: 'Exterior', alt: 'Red car covered in foam during an exterior wash' },
 ];
 
 const LAYERS = [
@@ -152,7 +152,7 @@ export default function Home() {
                 <img
                   key={g.src}
                   src={g.src}
-                  alt={g.caption}
+                  alt={g.alt}
                   className={i === slide ? 'is-active' : ''}
                   loading={i < 2 ? 'eager' : 'lazy'}
                 />
