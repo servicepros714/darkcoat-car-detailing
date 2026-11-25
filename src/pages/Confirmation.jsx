@@ -107,7 +107,7 @@ export default function Confirmation() {
           </div>
 
           <p className="muted confirm__note">
-            We’ll reach out before your appointment. Need to change something? Call or text {BUSINESS.phone}.
+            Need to change something? Call {BUSINESS.phone}.
           </p>
           <div className="confirm__btns">
             <Link to="/" className="btn btn-red">Back to home</Link>

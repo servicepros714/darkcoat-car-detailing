@@ -415,7 +415,7 @@ export default function Book() {
               <header className="step__head">
                 <p className="eyebrow">Step 5</p>
                 <h1 className="step__title">Where should we pull up?</h1>
-                <p className="muted">We’ll reach out before your appointment to confirm.</p>
+                <p className="muted">Your address and contact details, so we can find you.</p>
               </header>
               <form
                 className="form"
