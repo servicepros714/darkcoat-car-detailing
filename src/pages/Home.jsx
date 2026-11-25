@@ -98,9 +98,9 @@ export default function Home() {
           </div>
 
           <div className="hero__slats" aria-hidden="true">
-            <div className="slat slat--1"><img src="/images/red-headlight.webp" alt="" /></div>
-            <div className="slat slat--2"><img src="/images/blue-gt.webp" alt="" /></div>
-            <div className="slat slat--3"><img src="/images/black-rinse.webp" alt="" /></div>
+            <div className="slat slat--1"><img src="/images/red-headlight-hero.webp" alt="" width="560" height="796" /></div>
+            <div className="slat slat--2"><img src="/images/blue-gt-hero.webp" alt="" width="560" height="995" fetchpriority="high" /></div>
+            <div className="slat slat--3"><img src="/images/black-rinse-hero.webp" alt="" width="560" height="746" /></div>
             <div className="hero__chip">
               <span>Interior details from</span>
               <strong>$150</strong>

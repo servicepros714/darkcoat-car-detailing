@@ -112,13 +112,12 @@ section {
   color: var(--red-hi);
 }
 
+/* Hero slides in but is never invisible, so it paints right away (keeps LCP fast). */
 @keyframes heroIn {
   from {
-    opacity: 0;
     transform: translateY(24px);
   }
   to {
-    opacity: 1;
     transform: none;
   }
 }
@@ -171,12 +170,13 @@ section {
   object-position: 65% center;
 }
 
+/* Slats rise into place instead of wiping open from nothing, so the hero image is visible from the first paint. */
 @keyframes slatIn {
   from {
-    clip-path: polygon(18% 100%, 100% 100%, 82% 100%, 0 100%);
+    transform: translateY(40px);
   }
   to {
-    clip-path: polygon(18% 0, 100% 0, 82% 100%, 0 100%);
+    transform: none;
   }
 }
 
