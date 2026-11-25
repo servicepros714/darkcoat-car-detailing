@@ -9,6 +9,9 @@ import Book from './pages/Book.jsx';
 import Checkout from './pages/Checkout.jsx';
 import Confirmation from './pages/Confirmation.jsx';
 import NotFound from './pages/NotFound.jsx';
+import Landing from './pages/Landing.jsx';
+import Seo from './components/Seo.jsx';
+import { LANDING_PAGES } from './lib/pages.js';
 
 const FLOW_ROUTES = ['/book', '/checkout', '/confirmation'];
 
@@ -19,10 +22,14 @@ export default function App() {
   return (
     <>
       <ScrollManager />
+      <Seo />
       <Header compact={inFlow} />
       <main className={inFlow ? 'main main--flow' : 'main'}>
         <Routes>
           <Route path="/" element={<Home />} />
+          {LANDING_PAGES.map((page) => (
+            <Route key={page.path} path={page.path} element={<Landing page={page} />} />
+          ))}
           <Route path="/book" element={<Book />} />
           <Route path="/checkout" element={<Checkout />} />
           <Route path="/confirmation" element={<Confirmation />} />

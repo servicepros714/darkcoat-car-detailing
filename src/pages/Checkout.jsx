@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { loadStripe } from '@stripe/stripe-js';
-import { Elements, PaymentElement, useElements, useStripe } from '@stripe/react-stripe-js';
+import { Elements, ExpressCheckoutElement, PaymentElement, useElements, useStripe } from '@stripe/react-stripe-js';
 import { format } from 'date-fns';
 import { ArrowLeft, Lock, Tag, X, Loader2, BadgePercent } from 'lucide-react';
 import { getPackage, serviceLabel, subtotal, PREPAY_CODE, PREPAY_DISCOUNT } from '../config/services.js';
@@ -55,9 +55,11 @@ function PayForm({ draft, total, onPaid, busy, setBusy }) {
   const stripe = useStripe();
   const elements = useElements();
   const [ready, setReady] = useState(false);
+  const [expressReady, setExpressReady] = useState(false);
 
+  // Card form submit and the Express Checkout buttons (Link, Apple Pay, Google Pay) both end here.
   async function handleSubmit(e) {
-    e.preventDefault();
+    e?.preventDefault?.();
     if (!stripe || !elements || busy) return;
     setBusy(true);
     try {
@@ -100,6 +102,14 @@ function PayForm({ draft, total, onPaid, busy, setBusy }) {
 
   return (
     <form onSubmit={handleSubmit} className="pay-form">
+      <div className={`express${expressReady ? ' is-ready' : ''}`}>
+        <ExpressCheckoutElement
+          onConfirm={() => handleSubmit()}
+          onReady={(ev) => setExpressReady(Boolean(ev?.availablePaymentMethods))}
+          options={{ buttonHeight: 48 }}
+        />
+      </div>
+      {expressReady && <p className="pay-divider"><span>or pay with card</span></p>}
       <PaymentElement onReady={() => setReady(true)} options={{ layout: 'tabs' }} />
       <button type="submit" className="btn btn-red btn-lg btn-block" disabled={!stripe || !ready || busy}>
         {busy ? <Loader2 className="spin" size={18} /> : <Lock size={17} />}
@@ -200,7 +210,7 @@ export default function Checkout() {
         name: payload.name,
         email: payload.email,
         address: payload.address,
-        total: paymentStatus === 'Paid' ? total : sub,
+        total: res.total ?? (paymentStatus === 'Paid' ? total : sub),
         payment_status: paymentStatus,
       });
       clearDraft();
@@ -208,7 +218,8 @@ export default function Checkout() {
     } catch (err) {
       setBusy(false);
       if (err.status === 409) {
-        toast.error('That time was just booked. Please choose another time.');
+        // The Worker's message says whether a card payment was refunded.
+        toast.error(err.message || 'That time was just booked. Please choose another time.', { duration: 9000 });
         navigate('/book');
       } else if (paymentStatus === 'Paid') {
         toast.error('Payment received, but we couldn’t save your booking. Please call us — you won’t be charged twice.', { duration: 9000 });

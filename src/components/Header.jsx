@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { Menu, X, Phone, CalendarCheck, Clock, MapPin } from 'lucide-react';
-import { BUSINESS } from '../config/business.js';
+import { BUSINESS, REVIEWS } from '../config/business.js';
 
 const LEFT_LINKS = [
   { to: '/#packages', label: 'Packages' },
   { to: '/#gallery', label: 'Gallery' },
-  { to: '/#reviews', label: 'Reviews' },
+  REVIEWS.length ? { to: '/#reviews', label: 'Reviews' } : { to: '/#why', label: 'Why us' },
 ];
 const RIGHT_LINKS = [
   { to: '/#area', label: 'Service Area' },

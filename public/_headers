@@ -1,0 +1,6 @@
+# Keep the *.pages.dev copies out of search results (the real site is darkcoatcardetailing.site).
+https://:project.pages.dev/*
+  X-Robots-Tag: noindex
+
+https://:version.:project.pages.dev/*
+  X-Robots-Tag: noindex

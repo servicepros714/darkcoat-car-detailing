@@ -4,6 +4,7 @@ export const PACKAGES = [
     id: 'basic',
     name: 'Basic Detail',
     price: 150,
+    duration: '2–3 hours',
     tagline: 'The reset your daily driver needs.',
     image: '/images/red-side-garage.webp',
     features: [
@@ -16,6 +17,7 @@ export const PACKAGES = [
     id: 'premium',
     name: 'Premium Detail',
     price: 200,
+    duration: '4–6 hours',
     tagline: 'Deep extraction, shampoo and UV protection.',
     image: '/images/black-rinse.webp',
     popular: true,

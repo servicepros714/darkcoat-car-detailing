@@ -1,0 +1,16 @@
+// Worker dark-coat-car-detailing-v2 on the Detailingmarketers2 account (same D1 as Hyper Coat, Oso, Phantom, Nitos, High End).
+{
+  "name": "dark-coat-car-detailing-v2",
+  "main": "worker.js",
+  "compatibility_date": "2026-10-01",
+  "account_id": "5df257c170669d41c20367d89e7963d1",
+  "workers_dev": true,
+  "keep_vars": true,
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "detailing-bookings-detailingmarketers2",
+      "database_id": "4143248b-0d9b-4c96-b078-61772ba3597e"
+    }
+  ]
+}

@@ -1,8 +1,8 @@
 // All scheduling runs on California time, regardless of the visitor's device time zone.
 export const TZ = 'America/Los_Angeles';
 export const LEAD_MINUTES = 4 * 60;
-export const OPEN_HOUR = 7; // 7:00 AM
-export const CLOSE_HOUR = 19; // last slot 7:00 PM
+export const OPEN_HOUR = 8; // 8:00 AM (first start time)
+export const CLOSE_HOUR = 17; // 5:00 PM (last start time); must match worker/worker.js
 
 export function caNow() {
   const parts = new Intl.DateTimeFormat('en-US', {

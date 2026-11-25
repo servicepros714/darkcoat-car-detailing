@@ -1,341 +1,415 @@
-/**
- * Dark Coat Car Detailing — Cloudflare Worker
- * Worker name:   darkcoat-detailing-worker
- * D1 binding:    DB   (shared bookings table)
- * Secret:        STRIPE_SECRET_KEY   (sk_live_... — set in the dashboard)
- * Optional var:  ALLOWED_ORIGIN      (e.g. https://darkcoat-car-detailing.pages.dev — defaults to *)
- *
- * Routes
- *   GET  /api/health
- *   GET  /api/availability?date=YYYY-MM-DD
- *   POST /api/create-payment-intent
- *   POST /api/bookings
- */
+// dark-coat-car-detailing-v2
+// Cloudflare Worker for Dark Coat Car Detailing (San Clemente): availability, Stripe
+// PaymentIntents and bookings, in the shared D1 database `detailing-bookings-detailingmarketers2`.
+// Every read/write is scoped by source = "darkcoat-san-clemente". Dates/times are California time.
+// That database keeps the PaymentIntent on the booking row (bookings.payment_intent_id, unique
+// index) and has no booking_payments / booking_notifications tables, so the total goes in notes.
+//
+// Flow (matches src/pages/Checkout.jsx + Confirmation.jsx):
+//   card:      POST /api/create-payment-intent -> browser confirms with Stripe ->
+//              POST /api/bookings { paymentIntentId }  (the Worker re-reads the PaymentIntent
+//              from Stripe and checks status, site, amount, services, date and time)
+//   pay later: POST /api/bookings { payLater: true }
+// A new booking sends one `booking_confirmed` event to GHL (only when the row is first inserted).
+//
+// Secrets (dashboard -> Worker -> Settings -> Variables and Secrets, or `wrangler secret put`):
+//   STRIPE_SECRET_KEY  required. Same Stripe account as VITE_STRIPE_PUBLISHABLE_KEY
+//   GHL_WEBHOOK_URL    required for the booking email
+//   ADMIN_TOKEN        optional. `Authorization: Bearer <token>` for GET/PATCH /api/bookings.
+//                      Without it the admin routes stay closed.
+//
+// The shared table already exists; this Worker never creates or alters tables.
 
-const SOURCE = 'darkcoat';
-const ID_PREFIX = 'DKC-';
-const TZ = 'America/Los_Angeles';
-const LEAD_MINUTES = 240; // 4 hours
-const OPEN_HOUR = 7;
-const CLOSE_HOUR = 19;
+const SOURCE = 'darkcoat-san-clemente'
+const SOURCE_LABEL = 'Dark Coat Car Detailing'
+const PREFIX = 'DKC-'
 
-// Server-side prices in cents — never trust amounts from the browser.
-const PACKAGES = {
-  basic: { name: 'Basic Detail', cents: 15000 },
-  premium: { name: 'Premium Detail', cents: 20000 },
-};
-const ADDON = { name: 'Exterior Wash', cents: 5000 };
-const COUPONS = { PREPAY: 1500 };
-
-// Fields the shared admin dashboard is allowed to patch.
-const PATCHABLE = ['reschedule_date', 'reschedule_time', 'original_date', 'original_time', 'notes2'];
-
-const SCHEMA = `
-  CREATE TABLE IF NOT EXISTS bookings (
-    id TEXT PRIMARY KEY,
-    date TEXT NOT NULL,
-    time TEXT NOT NULL,
-    service TEXT NOT NULL,
-    name TEXT NOT NULL,
-    phone TEXT NOT NULL,
-    email TEXT,
-    vehicle TEXT,
-    address TEXT,
-    notes TEXT,
-    source TEXT,
-    created_at TEXT,
-    status TEXT DEFAULT 'Confirmed',
-    reschedule_date TEXT,
-    reschedule_time TEXT,
-    notes2 TEXT,
-    original_date TEXT,
-    original_time TEXT,
-    payment_status TEXT
-  )
-`;
-
-let schemaReady = false;
-
-async function ensureSchema(db) {
-  if (schemaReady) return;
-  // .exec() fails on multi-line SQL ("incomplete input"), so collapse whitespace first.
-  await db.exec(SCHEMA.replace(/\s+/g, ' ').trim());
-  await db.exec('CREATE INDEX IF NOT EXISTS idx_bookings_source_date ON bookings (source, date)');
-  schemaReady = true;
+const SERVICES = {
+  basic: { name: 'Basic Detail', price: 150 },
+  premium: { name: 'Premium Detail', price: 200 },
+  exterior: { name: 'Exterior Wash', price: 50 }, // add-on only
 }
+const COUPONS = { PREPAY: 15 }
 
-/* ---------------- helpers ---------------- */
+// Start times 8:00 AM - 5:00 PM, every 30 minutes, every day (must match src/lib/caTime.js).
+const SLOT_START_MIN = 8 * 60
+const SLOT_END_MIN = 17 * 60
+const SLOT_STEP_MIN = 30
+const LEAD_MINUTES = 240
+const MAX_DAYS_AHEAD = 90
+const SLOTS = (() => {
+  const out = []
+  for (let t = SLOT_START_MIN; t <= SLOT_END_MIN; t += SLOT_STEP_MIN) {
+    const h24 = Math.floor(t / 60)
+    const m = t % 60
+    out.push(`${h24 % 12 === 0 ? 12 : h24 % 12}:${String(m).padStart(2, '0')} ${h24 >= 12 ? 'PM' : 'AM'}`)
+  }
+  return out
+})()
+
+// Fields the shared admin dashboard is allowed to update.
+const PATCHABLE = new Set([
+  'status',
+  'payment_status',
+  'notes2',
+  'reschedule_date',
+  'reschedule_time',
+  'original_date',
+  'original_time',
+])
 
 function corsHeaders(env) {
   return {
     'Access-Control-Allow-Origin': env.ALLOWED_ORIGIN || '*',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Methods': 'GET, POST, PATCH, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     'Access-Control-Max-Age': '86400',
-  };
+  }
 }
 
-function json(env, data, status = 200) {
-  return new Response(JSON.stringify(data), {
+function json(env, body, status = 200) {
+  return new Response(JSON.stringify(body), {
     status,
-    headers: { 'Content-Type': 'application/json', ...corsHeaders(env) },
-  });
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...corsHeaders(env) },
+  })
 }
 
-function caNow() {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: TZ,
+class HttpError extends Error {
+  constructor(status, message, code) {
+    super(message)
+    this.status = status
+    this.code = code
+  }
+}
+
+function newId() {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+  const bytes = crypto.getRandomValues(new Uint8Array(8))
+  return PREFIX + Array.from(bytes, (b) => alphabet[b % alphabet.length]).join('')
+}
+
+// ---------- validation ----------
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
+
+function nowLA() {
+  const p = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Los_Angeles',
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
     hourCycle: 'h23',
-  }).formatToParts(new Date());
-  const get = (t) => parts.find((p) => p.type === t).value;
-  return {
-    dateStr: `${get('year')}-${get('month')}-${get('day')}`,
-    minutes: Number(get('hour')) * 60 + Number(get('minute')),
-  };
+  }).formatToParts(new Date())
+  const get = (t) => p.find((x) => x.type === t).value
+  return { date: `${get('year')}-${get('month')}-${get('day')}`, minutes: Number(get('hour')) * 60 + Number(get('minute')) }
 }
 
-const VALID_TIMES = Array.from({ length: CLOSE_HOUR - OPEN_HOUR + 1 }, (_, i) => {
-  const h = OPEN_HOUR + i;
-  const h12 = h % 12 === 0 ? 12 : h % 12;
-  return { label: `${h12}:00 ${h < 12 ? 'AM' : 'PM'}`, minutes: h * 60 };
-});
-
-function isValidDate(s) {
-  return typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(Date.parse(`${s}T00:00:00Z`));
+function addDays(iso, days) {
+  const [y, m, d] = iso.split('-').map(Number)
+  const dt = new Date(Date.UTC(y, m - 1, d + days))
+  return dt.toISOString().slice(0, 10)
 }
 
-function slotTooSoon(date, minutes) {
-  const now = caNow();
-  if (date < now.dateStr) return true;
-  if (date > now.dateStr) return false;
-  return minutes < now.minutes + LEAD_MINUTES;
+function slotMinutes(label) {
+  const [t, sfx] = label.split(' ')
+  const [h, m] = t.split(':').map(Number)
+  return (h % 12) * 60 + (sfx === 'PM' ? 720 : 0) + m
 }
 
-function priceFor(pkg, addon, coupon) {
-  const p = PACKAGES[pkg];
-  if (!p) return null;
-  const subtotal = p.cents + (addon ? ADDON.cents : 0);
-  const discount = COUPONS[String(coupon || '').toUpperCase()] || 0;
-  return {
-    subtotal,
-    discount,
-    total: subtotal - discount,
-    service: addon ? `${p.name} + ${ADDON.name}` : p.name,
-  };
+// One detail (Basic or Premium), optionally plus the Exterior Wash. Returned in catalog order.
+function checkServices(list) {
+  if (!Array.isArray(list) || list.length === 0) throw new HttpError(400, 'Choose a Basic or Premium Detail.', 'services')
+  const ids = [...new Set(list.map(String))]
+  if (ids.some((id) => !SERVICES[id])) throw new HttpError(400, 'Unknown service selected.', 'services')
+  const details = ids.filter((id) => id === 'basic' || id === 'premium')
+  if (details.length !== 1) {
+    throw new HttpError(400, 'Choose either the Basic or the Premium Detail. The Exterior Wash is an add-on.', 'services')
+  }
+  return Object.keys(SERVICES).filter((id) => ids.includes(id))
 }
 
-function newId() {
-  const t = Date.now().toString(36).toUpperCase().slice(-5);
-  const r = Math.random().toString(36).slice(2, 5).toUpperCase();
-  return `${ID_PREFIX}${t}${r}`;
+const subtotalOf = (ids) => ids.reduce((sum, id) => sum + SERVICES[id].price, 0)
+const labelOf = (ids) => ids.map((id) => SERVICES[id].name).join(' + ')
+
+function couponCode(code) {
+  const c = String(code || '').trim().toUpperCase()
+  return COUPONS[c] ? c : ''
 }
 
-function clean(v, max = 200) {
-  return String(v ?? '').trim().slice(0, max);
+// enforceLead is false when saving a booking that is already paid, so a customer who paid
+// just before the cutoff is never rejected after their card was charged.
+function checkSlot(date, time, enforceLead = true) {
+  if (!ISO_DATE.test(date || '')) throw new HttpError(400, 'Pick a valid date.', 'date')
+  if (!SLOTS.includes(time)) throw new HttpError(400, 'Pick a valid time.', 'time')
+  const now = nowLA()
+  if (date < now.date) throw new HttpError(400, 'That date has already passed.', 'date')
+  if (date > addDays(now.date, MAX_DAYS_AHEAD)) throw new HttpError(400, 'Please pick a date within the next 90 days.', 'date')
+  if (enforceLead && date === now.date && slotMinutes(time) < now.minutes + LEAD_MINUTES) {
+    throw new HttpError(400, 'That time is too soon. Please pick a later time.', 'time')
+  }
 }
 
-async function stripe(env, path, method = 'GET', form) {
-  const res = await fetch(`https://api.stripe.com/v1/${path}`, {
+function checkContact(b) {
+  const clean = (v, max) => String(v || '').trim().slice(0, max)
+  const out = {
+    name: clean(b.name, 120),
+    phone: clean(b.phone, 30),
+    email: clean(b.email, 200),
+    vehicle: clean(b.vehicle, 120),
+    address: clean(b.address, 250),
+  }
+  if (out.name.length < 2) throw new HttpError(400, 'Enter your full name.', 'name')
+  if (out.phone.replace(/\D/g, '').length < 10) throw new HttpError(400, 'Enter a valid phone number.', 'phone')
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(out.email)) throw new HttpError(400, 'Enter a valid email address.', 'email')
+  if (out.vehicle.length < 3) throw new HttpError(400, 'Enter your vehicle (year, make, model).', 'vehicle')
+  if (out.address.length < 6) throw new HttpError(400, 'Enter the address where we should meet you.', 'address')
+  return out
+}
+
+// ---------- D1 ----------
+
+async function slotTaken(db, date, time) {
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM bookings
+       WHERE source = ? AND date = ? AND time = ?
+       AND LOWER(COALESCE(status, '')) NOT IN ('cancelled', 'canceled')`,
+    )
+    .bind(SOURCE, date, time)
+    .first()
+  return (row?.n || 0) > 0
+}
+
+async function findByPaymentIntent(db, piId) {
+  const row = await db
+    .prepare(`SELECT id, payment_status, notes FROM bookings WHERE payment_intent_id = ? AND source = ? LIMIT 1`)
+    .bind(piId, SOURCE)
+    .first()
+  if (!row) return null
+  const m = /Total \$(\d+)/.exec(row.notes || '')
+  return { ...row, total: m ? Number(m[1]) : null }
+}
+
+// ---------- Stripe ----------
+
+async function stripe(env, method, path, params) {
+  if (!env.STRIPE_SECRET_KEY) throw new HttpError(500, 'Payments are not configured yet.', 'stripe_config')
+  const res = await fetch(`https://api.stripe.com/v1${path}`, {
     method,
     headers: {
       Authorization: `Bearer ${env.STRIPE_SECRET_KEY}`,
-      ...(form ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {}),
+      ...(params ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {}),
     },
-    body: form ? new URLSearchParams(form).toString() : undefined,
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data?.error?.message || 'Stripe request failed');
-  return data;
+    body: params ? new URLSearchParams(params) : undefined,
+  })
+  const data = await res.json()
+  if (!res.ok) throw new HttpError(502, data?.error?.message || 'Payment provider error.', 'stripe')
+  return data
 }
 
-/* ---------------- routes ---------------- */
+// ---------- GHL ----------
 
-async function createPaymentIntent(request, env) {
-  if (!env.STRIPE_SECRET_KEY) return json(env, { error: 'Payments are not configured.' }, 503);
-  const body = await request.json().catch(() => ({}));
-  const price = priceFor(body.pkg, body.addon, body.coupon);
-  if (!price) return json(env, { error: 'Invalid package.' }, 400);
+// Sends the booking to GHL. Called once, right after the booking row is first inserted
+// (a refresh or retry finds the existing row and never reaches this). Never throws.
+async function notifyBookingConfirmed(env, booking) {
+  if (!env.GHL_WEBHOOK_URL) return
+  await fetch(env.GHL_WEBHOOK_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...booking, source: SOURCE, source_label: SOURCE_LABEL, event_type: 'booking_confirmed' }),
+  }).catch((err) => console.error('GHL webhook failed', err?.message || err))
+}
 
-  const form = {
-    amount: String(price.total),
+// ---------- routes ----------
+
+async function availability(env, url) {
+  const start = url.searchParams.get('start')
+  const end = url.searchParams.get('end')
+  if (!ISO_DATE.test(start || '') || !ISO_DATE.test(end || '') || end < start) {
+    throw new HttpError(400, 'start and end are required (YYYY-MM-DD).')
+  }
+  const { results } = await env.DB
+    .prepare(
+      `SELECT date, time FROM bookings
+       WHERE source = ? AND date >= ? AND date <= ?
+       AND LOWER(COALESCE(status, '')) NOT IN ('cancelled', 'canceled')`,
+    )
+    .bind(SOURCE, start, end)
+    .all()
+  const booked = {}
+  for (const r of results || []) (booked[r.date] ||= []).push(r.time)
+  return json(env, { booked })
+}
+
+async function createPaymentIntent(env, request) {
+  const b = await request.json()
+  const ids = checkServices(b.services)
+  checkSlot(b.date, b.time)
+  const sub = subtotalOf(ids)
+  const coupon = couponCode(b.coupon)
+  const total = sub - (coupon ? Math.min(COUPONS[coupon], sub) : 0)
+
+  // Card payments should not depend on D1, but a known clash is refused up front.
+  try {
+    if (await slotTaken(env.DB, b.date, b.time)) {
+      throw new HttpError(409, 'That time was just booked. Please pick another time.', 'slot_taken')
+    }
+  } catch (e) {
+    if (e instanceof HttpError) throw e
+  }
+
+  const params = {
+    amount: String(total * 100),
     currency: 'usd',
     'automatic_payment_methods[enabled]': 'true',
-    description: `${price.service} — Dark Coat Car Detailing`,
+    description: `${SOURCE_LABEL} - ${labelOf(ids)} on ${b.date} at ${b.time}`,
     'metadata[source]': SOURCE,
-    'metadata[service]': price.service,
-    'metadata[date]': clean(body.date, 20),
-    'metadata[time]': clean(body.time, 20),
-    'metadata[name]': clean(body.name, 100),
-    'metadata[coupon]': price.discount ? String(body.coupon).toUpperCase() : '',
-  };
-  const email = clean(body.email, 200);
-  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) form.receipt_email = email;
-
-  const pi = await stripe(env, 'payment_intents', 'POST', form);
-  return json(env, { clientSecret: pi.client_secret, amount: price.total });
-}
-
-async function availability(url, env) {
-  const date = url.searchParams.get('date');
-  if (!isValidDate(date)) return json(env, { error: 'Invalid date.' }, 400);
-  const { results } = await env.DB.prepare(
-    `SELECT time, reschedule_date, reschedule_time FROM bookings
-     WHERE source = ? AND (date = ? OR reschedule_date = ?)
-     AND (status IS NULL OR status NOT IN ('Cancelled', 'Canceled'))`
-  )
-    .bind(SOURCE, date, date)
-    .all();
-
-  const booked = new Set();
-  for (const r of results || []) {
-    // A rescheduled booking occupies its new slot, not the original one.
-    if (r.reschedule_date) {
-      if (r.reschedule_date === date && r.reschedule_time) booked.add(r.reschedule_time);
-    } else {
-      booked.add(r.time);
-    }
+    'metadata[services]': ids.join(','),
+    'metadata[date]': b.date,
+    'metadata[time]': b.time,
+    'metadata[coupon]': coupon,
+    'metadata[customer]': String(b.name || '').slice(0, 100),
   }
-  return json(env, { date, booked: [...booked] });
+  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(b.email || '')) params.receipt_email = String(b.email)
+
+  const pi = await stripe(env, 'POST', '/payment_intents', params)
+  return json(env, { clientSecret: pi.client_secret, paymentIntentId: pi.id, amount: total })
 }
 
-async function slotTaken(env, date, time) {
-  const row = await env.DB.prepare(
-    `SELECT id FROM bookings
-     WHERE source = ?
-     AND ((date = ? AND time = ? AND reschedule_date IS NULL) OR (reschedule_date = ? AND reschedule_time = ?))
-     AND (status IS NULL OR status NOT IN ('Cancelled', 'Canceled'))
-     LIMIT 1`
-  )
-    .bind(SOURCE, date, time, date, time)
-    .first();
-  return Boolean(row);
-}
+async function createBooking(env, request, ctx) {
+  const b = await request.json()
+  const ids = checkServices(b.services)
+  const payLater = b.payLater === true
+  checkSlot(b.date, b.time, payLater)
+  const contact = checkContact(b)
+  const sub = subtotalOf(ids)
 
-async function createBooking(request, env) {
-  const b = await request.json().catch(() => null);
-  if (!b) return json(env, { error: 'Invalid request.' }, 400);
+  let paymentStatus = 'Pay Later'
+  let coupon = null
+  let total = sub
+  let piId = null
 
-  const price = priceFor(b.pkg, b.addon, b.coupon);
-  if (!price) return json(env, { error: 'Invalid package.' }, 400);
+  if (!payLater) {
+    piId = String(b.paymentIntentId || '')
+    if (!/^pi_[A-Za-z0-9_]+$/.test(piId)) throw new HttpError(400, 'Missing payment confirmation.', 'payment')
 
-  const date = clean(b.date, 10);
-  const time = clean(b.time, 10);
-  const slot = VALID_TIMES.find((t) => t.label === time);
-  if (!isValidDate(date) || !slot) return json(env, { error: 'Invalid date or time.' }, 400);
+    // Idempotent: a refresh or retry after a successful save returns the same booking.
+    const existing = await findByPaymentIntent(env.DB, piId)
+    if (existing) return json(env, { id: existing.id, payment_status: existing.payment_status, total: existing.total, existing: true })
 
-  const name = clean(b.name, 100);
-  const phone = clean(b.phone, 30);
-  const email = clean(b.email, 200);
-  const vehicle = clean(b.vehicle, 120);
-  const address = clean(b.address, 250);
-  if (!name) return json(env, { error: 'Name is required.' }, 400);
-  if (phone.replace(/\D/g, '').length < 10) return json(env, { error: 'Phone is required.' }, 400);
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json(env, { error: 'A valid email is required.' }, 400);
-  if (!vehicle) return json(env, { error: 'Vehicle is required.' }, 400);
-  if (!address) return json(env, { error: 'Address is required.' }, 400);
-
-  const wantsPaid = b.payment_status === 'Paid';
-  let paymentStatus = 'Pay Later';
-  let paidCents = 0;
-  const piId = clean(b.payment_intent_id, 100);
-
-  if (wantsPaid) {
-    if (!piId || !env.STRIPE_SECRET_KEY) return json(env, { error: 'Missing payment reference.' }, 400);
-    // Idempotency: the same PaymentIntent can only create one booking.
-    const dupe = await env.DB.prepare('SELECT id FROM bookings WHERE source = ? AND notes LIKE ? LIMIT 1')
-      .bind(SOURCE, `%${piId}%`)
-      .first();
-    if (dupe) return json(env, { id: dupe.id, duplicate: true });
-
-    const pi = await stripe(env, `payment_intents/${encodeURIComponent(piId)}`);
-    if (!['succeeded', 'processing'].includes(pi.status) || pi.metadata?.source !== SOURCE) {
-      return json(env, { error: 'Payment not verified.' }, 402);
+    const pi = await stripe(env, 'GET', `/payment_intents/${encodeURIComponent(piId)}`)
+    const md = pi.metadata || {}
+    if (md.source !== SOURCE) throw new HttpError(400, 'Payment does not match this business.', 'payment')
+    if (!['succeeded', 'processing'].includes(pi.status)) throw new HttpError(402, 'Payment has not completed.', 'payment')
+    if (md.services !== ids.join(',') || md.date !== b.date || md.time !== b.time) {
+      throw new HttpError(400, 'Payment does not match this booking.', 'payment')
     }
-    paymentStatus = 'Paid';
-    paidCents = pi.amount_received || pi.amount;
-  } else {
-    // Unpaid bookings must respect the lead time and a free slot.
-    if (slotTooSoon(date, slot.minutes)) return json(env, { error: 'That time is too soon to book.' }, 409);
-    if (await slotTaken(env, date, time)) return json(env, { error: 'That time was just booked.' }, 409);
+    coupon = couponCode(md.coupon) || null
+    total = sub - (coupon ? Math.min(COUPONS[coupon], sub) : 0)
+    if (pi.amount !== total * 100) throw new HttpError(400, 'Payment amount does not match the selected services.', 'payment')
+    paymentStatus = 'Paid'
   }
 
-  // A paid customer is never turned away — flag a conflict for the admin instead.
-  const conflict = wantsPaid && (await slotTaken(env, date, time));
+  if (await slotTaken(env.DB, b.date, b.time)) {
+    if (piId) {
+      try {
+        await stripe(env, 'POST', '/refunds', { payment_intent: piId })
+      } catch {
+        throw new HttpError(409, 'That time was just booked and we could not refund automatically. Please call us.', 'slot_taken_refund_failed')
+      }
+      throw new HttpError(409, 'That time was just booked by someone else, so your payment has been refunded. Please pick another time.', 'slot_taken_refunded')
+    }
+    throw new HttpError(409, 'That time was just booked. Please pick another time.', 'slot_taken')
+  }
 
-  const noteParts = [
-    `Total $${((paymentStatus === 'Paid' ? paidCents : price.subtotal) / 100).toFixed(2)}`,
-    price.discount && paymentStatus === 'Paid' ? `Coupon ${String(b.coupon).toUpperCase()}` : '',
-    piId && paymentStatus === 'Paid' ? `PI ${piId}` : '',
-    conflict ? 'SLOT CONFLICT — please reschedule' : '',
-  ].filter(Boolean);
+  const id = newId()
+  const service = labelOf(ids)
+  const createdAt = new Date().toISOString().replace('T', ' ').slice(0, 19)
+  const notes = [`Total $${total}`, coupon ? `Coupon ${coupon}` : '', piId ? `Stripe ${piId}` : ''].filter(Boolean).join(' | ')
+  try {
+    await env.DB.prepare(
+      `INSERT INTO bookings (id, date, time, service, name, phone, email, vehicle, address, notes, source, created_at, status, payment_status, payment_intent_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Confirmed', ?, ?)`,
+    ).bind(id, b.date, b.time, service, contact.name, contact.phone, contact.email, contact.vehicle, contact.address,
+      notes, SOURCE, createdAt, paymentStatus, piId).run()
+  } catch (e) {
+    // Unique index on payment_intent_id: a simultaneous retry already saved this payment.
+    const existing = piId && (await findByPaymentIntent(env.DB, piId))
+    if (existing) return json(env, { id: existing.id, payment_status: existing.payment_status, total: existing.total, existing: true })
+    throw e
+  }
 
-  const id = newId();
-  await env.DB.prepare(
-    `INSERT INTO bookings
-      (id, date, time, service, name, phone, email, vehicle, address, notes, source, created_at, status,
-       reschedule_date, reschedule_time, notes2, original_date, original_time, payment_status)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, ?)`
-  )
-    .bind(
-      id,
-      date,
-      time,
-      price.service,
-      name,
-      phone,
-      email,
-      vehicle,
-      address,
-      noteParts.join(' · '),
-      SOURCE,
-      new Date().toISOString(),
-      'Confirmed',
-      paymentStatus
+  ctx.waitUntil(notifyBookingConfirmed(env, {
+    id, ...contact, service, date: b.date, time: b.time, notes: String(b.notes || ''),
+    payment_status: paymentStatus, total,
+  }))
+
+  return json(env, { id, payment_status: paymentStatus, total }, 201)
+}
+
+async function timingSafeEqual(a, b) {
+  const enc = new TextEncoder()
+  const [ha, hb] = await Promise.all([
+    crypto.subtle.digest('SHA-256', enc.encode(a)),
+    crypto.subtle.digest('SHA-256', enc.encode(b)),
+  ])
+  return crypto.subtle.timingSafeEqual(ha, hb)
+}
+
+// Admin routes are closed unless ADMIN_TOKEN is set and matches.
+async function requireAdmin(env, request) {
+  const header = request.headers.get('Authorization') || ''
+  if (!env.ADMIN_TOKEN || !header.startsWith('Bearer ') || !(await timingSafeEqual(header.slice(7), env.ADMIN_TOKEN))) {
+    throw new HttpError(401, 'Unauthorized.')
+  }
+}
+
+async function listBookings(env, request) {
+  await requireAdmin(env, request)
+  const { results } = await env.DB
+    .prepare(
+      `SELECT * FROM bookings WHERE source = ? ORDER BY date DESC, time DESC`,
     )
-    .run();
-
-  return json(env, { id, payment_status: paymentStatus }, 201);
+    .bind(SOURCE)
+    .all()
+  return json(env, results || [])
 }
 
-/* ---------------- entry ---------------- */
+async function patchBooking(env, request, id) {
+  await requireAdmin(env, request)
+  const body = await request.json()
+  const entries = Object.entries(body || {}).filter(([k]) => PATCHABLE.has(k))
+  if (!entries.length) throw new HttpError(400, 'No updatable fields supplied.')
+  const sets = entries.map(([k]) => `${k} = ?`).join(', ')
+  const result = await env.DB
+    .prepare(`UPDATE bookings SET ${sets} WHERE id = ? AND source = ?`)
+    .bind(...entries.map(([, v]) => (v == null ? null : String(v))), id, SOURCE)
+    .run()
+  if (!result.meta.changes) throw new HttpError(404, 'Booking not found.')
+  return json(env, { ok: true, id })
+}
 
 export default {
-  async fetch(request, env) {
-    const url = new URL(request.url);
-    const { pathname } = url;
-
-    if (request.method === 'OPTIONS') {
-      return new Response(null, { status: 204, headers: corsHeaders(env) });
-    }
-
+  async fetch(request, env, ctx) {
+    if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders(env) })
+    const url = new URL(request.url)
+    const path = url.pathname.replace(/\/+$/, '') || '/'
     try {
-      // Payment route runs BEFORE any schema work so D1 can never block checkout.
-      if (pathname === '/api/create-payment-intent' && request.method === 'POST') {
-        return await createPaymentIntent(request, env);
-      }
-
-      if (pathname === '/api/health') {
-        return json(env, { ok: true, source: SOURCE, patchable: PATCHABLE });
-      }
-
-      if (!env.DB) return json(env, { error: 'Database not bound.' }, 500);
-      await ensureSchema(env.DB);
-
-      if (pathname === '/api/availability' && request.method === 'GET') {
-        return await availability(url, env);
-      }
-      if (pathname === '/api/bookings' && request.method === 'POST') {
-        return await createBooking(request, env);
-      }
-
-      return json(env, { error: 'Not found' }, 404);
-    } catch (err) {
-      return json(env, { error: err.message || 'Server error' }, 500);
+      if (path === '/api/health') return json(env, { ok: true, source: SOURCE })
+      if (path === '/api/availability' && request.method === 'GET') return await availability(env, url)
+      if (path === '/api/create-payment-intent' && request.method === 'POST') return await createPaymentIntent(env, request)
+      if (path === '/api/bookings' && request.method === 'POST') return await createBooking(env, request, ctx)
+      if (path === '/api/bookings' && request.method === 'GET') return await listBookings(env, request)
+      const m = path.match(/^\/api\/bookings\/([^/]+)$/)
+      if (m && request.method === 'PATCH') return await patchBooking(env, request, decodeURIComponent(m[1]))
+      return json(env, { error: 'Not found' }, 404)
+    } catch (e) {
+      if (e instanceof HttpError) return json(env, { error: e.message, code: e.code }, e.status)
+      if (e instanceof SyntaxError) return json(env, { error: 'Invalid request.' }, 400)
+      console.error(e)
+      return json(env, { error: 'Server error. Please try again.' }, 500)
     }
   },
-};
+}

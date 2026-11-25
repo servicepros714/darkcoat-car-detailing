@@ -1,7 +1,7 @@
 import { Link } from 'react-router-dom';
 import { Phone, Clock, MapPin, ArrowUpRight } from 'lucide-react';
-import { BUSINESS } from '../config/business.js';
-import { PACKAGES, ADDON } from '../config/services.js';
+import { BUSINESS, REVIEWS } from '../config/business.js';
+import { SERVICE_PAGES, CITY_PAGES, HOME_CITY } from '../lib/pages.js';
 
 export default function Footer() {
   const year = new Date().getFullYear();
@@ -10,9 +10,9 @@ export default function Footer() {
       <div className="footer__grid">
         <div className="footer__call">
           <img src="/images/logo.webp" alt={BUSINESS.name} className="footer__logo" loading="lazy" width="720" height="305" />
-          <p className="footer__lede">Mobile interior detailing and hand exterior washes, delivered to your driveway in {BUSINESS.city}.</p>
+          <p className="footer__lede">Mobile interior detailing and hand exterior washes, delivered to your driveway in {BUSINESS.city} with our own water and power.</p>
           <a href={BUSINESS.phoneHref} className="footer__phone">
-            <span>Call or text</span>
+            <span>Call</span>
             {BUSINESS.phone}
           </a>
           <Link to="/book" className="btn btn-red">
@@ -26,7 +26,7 @@ export default function Footer() {
             <ul>
               <li><Link to="/#packages">Packages</Link></li>
               <li><Link to="/#gallery">Gallery</Link></li>
-              <li><Link to="/#reviews">Reviews</Link></li>
+              {REVIEWS.length > 0 && <li><Link to="/#reviews">Reviews</Link></li>}
               <li><Link to="/#area">Service Area</Link></li>
               <li><Link to="/#faq">FAQ</Link></li>
             </ul>
@@ -34,24 +34,24 @@ export default function Footer() {
           <div>
             <h4>Services</h4>
             <ul>
-              {PACKAGES.map((p) => (
-                <li key={p.id}>
-                  <Link to={`/book?package=${p.id}`}>
-                    {p.name} <em>${p.price}</em>
-                  </Link>
-                </li>
+              {SERVICE_PAGES.map((p) => (
+                <li key={p.path}><Link to={p.path}>{p.nav}</Link></li>
               ))}
-              <li>
-                <Link to="/book">
-                  {ADDON.name} <em>+${ADDON.price}</em>
-                </Link>
-              </li>
+            </ul>
+          </div>
+          <div>
+            <h4>Areas</h4>
+            <ul>
+              <li><Link to="/">{HOME_CITY}</Link></li>
+              {CITY_PAGES.map((p) => (
+                <li key={p.path}><Link to={p.path}>{p.city}</Link></li>
+              ))}
             </ul>
           </div>
           <div>
             <h4>Visit</h4>
             <ul className="footer__contact">
-              <li><MapPin size={15} /> {BUSINESS.address}</li>
+              <li><MapPin size={15} /> {BUSINESS.address}, we come to you</li>
               <li><Clock size={15} /> {BUSINESS.hours}</li>
               <li><Phone size={15} /> <a href={BUSINESS.phoneHref}>{BUSINESS.phone}</a></li>
             </ul>

@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
-Disallow: /checkout
-Disallow: /confirmation
+
+Sitemap: https://darkcoatcardetailing.site/sitemap.xml
