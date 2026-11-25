@@ -12,10 +12,11 @@
 // Canonical domain (no www; www redirects to it).
 export const SITE_URL = (import.meta.env.VITE_SITE_URL || 'https://darkcoatcardetailing.site').replace(/\/$/, '');
 
-// Google Business Profile, used in the schema (sameAs). Leave '' until known.
-export const GOOGLE_PROFILE_URL = '';
+// Google Business Profile, used in the schema (sameAs). The profile lists 373 Plaza Estival, but the
+// business is mobile only, so the site shows the city (schema adds the ZIP).
+export const GOOGLE_PROFILE_URL = 'https://www.google.com/search?kgmid=/g/11ytsm9zj6&q=Dark+Coat+Car+Detailing';
 // Shown above the reviews once real reviews are added, e.g. { value: '5.0', count: 12 }.
-export const GOOGLE_RATING = null;
+export const GOOGLE_RATING = { value: '5.0', count: 10 };
 
 export const BUSINESS = {
   name: 'Dark Coat Car Detailing',
@@ -37,7 +38,14 @@ export const BUSINESS = {
 // Real Google reviews only, as { name: 'First L.', text: '...' } (first name + last initial,
 // typos fixed; leave out reviews that read like a shop visit). The section and its menu link
 // stay hidden while this is empty. (The draft's four reviews were placeholders and are gone.)
-export const REVIEWS = [];
+// Left out: Judith M. ("took my car to", reads like a shop visit) and Chris P. ("chose this place").
+export const REVIEWS = [
+  { name: 'Bina R.', text: 'I didn’t know what to expect since it seems like a newer business. Tried it out today and it was a great experience, very professional customer service, cleanest my car has been, and I love that they come to my house so I don’t have to go anywhere.' },
+  { name: 'Joel V.', text: 'Dark Coat Car Detailing is pretty good. Great workers and good prices. They got my car looking better than ever. Thanks again, Dark Coat Car Detailing!' },
+  { name: 'Laurelia G.', text: 'The service was great. I really appreciate how they treat their clients. When I called to book, the receptionist knew all the answers to my questions.' },
+  { name: 'Richard S.', text: 'Appreciate the Dark Coat team for always hooking my ride up and never disappointing.' },
+  { name: 'Franklin B.', text: 'First time using Dark Coat and they did a good job.' },
+];
 
 // Home page FAQ. Shown on the page and used for the FAQPage schema, so keep both in sync.
 export const FAQS = [
